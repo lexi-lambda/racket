@@ -4,6 +4,7 @@
            (rename "small-scheme.rkt" define-syntax -define-syntax)
            "ellipses.rkt"
            (for-syntax "stx.rkt" "small-scheme.rkt"
+                       "prop-template-metafunction.rkt"
                        (rename "small-scheme.rkt" define -define)
                        (rename "small-scheme.rkt" define-syntax -define-syntax)
                        "member.rkt" "sc.rkt" '#%kernel))
@@ -12,14 +13,17 @@
            datum
            ~? ~@
            ~@! signal-absent-pvar
+           (for-syntax prop:metafunction
+                       metafunction
+                       metafunction-accessor
+                       metafunction?)
            (protect
             (for-syntax attribute-mapping
                         attribute-mapping?
                         attribute-mapping-name
                         attribute-mapping-var
                         attribute-mapping-depth
-                        attribute-mapping-check
-                        metafunction metafunction?)))
+                        attribute-mapping-check)))
 
 ;; ============================================================
 ;; Syntax of templates
@@ -148,11 +152,6 @@
   (define (attribute-mapping-depth a) (attribute-mapping-ref a 2))
   (define (attribute-mapping-check a) (attribute-mapping-ref a 3))
 
-  ;; (struct metafunction (var))
-  (define-values (struct:metafunction metafunction metafunction? metafunction-ref _mf-set!)
-    (make-struct-type 'syntax-metafunction #f 1 0 #f null (current-inspector)))
-  (define (metafunction-var mf) (metafunction-ref mf 0))
-
   (define (ht-guide? x)
     (if (and (pair? x) (eq? (car x) 'h-t)) #t #f))
   (define (ht-guide-t x)
@@ -219,7 +218,7 @@
                   (disappeared! (stx-car t))
                   (define-values (drivers guide) (parse-t (stx-cdr t) depth esc?))
                   (values drivers
-                          `(t-metafun ,(metafunction-var mf) ,guide
+                          `(t-metafun ,(metafunction-accessor mf) ,guide
                                       (quote-syntax
                                        ,(let ([tstx (and (syntax? t) t)])
                                           (datum->syntax tstx (cons (stx-car t) #f) tstx tstx))))))]
