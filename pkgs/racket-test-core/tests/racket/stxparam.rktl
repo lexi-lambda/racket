@@ -83,10 +83,28 @@
       (m b)))
 
   ; make sure it applies to #%module-begin for submodules
-  (splicing-letrec-syntax ([#%module-begin (syntax-rules ()
-                                             [(_) (#%plain-module-begin (begin (provide b) (m b)))])])
+  (splicing-let-syntax ([#%module-begin (syntax-rules ()
+                                          [(_) (#%plain-module-begin (begin (provide b) (m b)))])])
     (splicing-syntax-parameterize ([sp 'begin-defined])
       (module* sp-submod2 #f)))
+
+  ; ensure splicing-syntax-parameterize used in 'module-begin context applies to lifted declarations
+  (splicing-let-syntax ([m/lift (λ (stx)
+                                  (syntax-case stx ()
+                                    [(_ id) (syntax-local-lift-module-end-declaration
+                                             #'(m id))
+                                            #'(begin)]))])
+    (module* sp-submod3 #f
+      (splicing-syntax-parameterize ([sp 'lifted-decl])
+        (#%plain-module-begin
+         (provide b)
+         (m/lift b))))
+
+    (splicing-syntax-parameterize ([sp 'lifted-decl])
+      (module* sp-submod4 #f
+        (#%plain-module-begin
+         (provide b)
+         (m/lift b)))))
    
   (provide x y z w f g))
 
@@ -98,6 +116,8 @@
 (test 'also-nested values ((dynamic-require ''check-splicing-stxparam-1 'g)))
 (test 'sub-submod dynamic-require '(submod 'check-splicing-stxparam-1 sp-submod) 'b)
 (test 'begin-defined dynamic-require '(submod 'check-splicing-stxparam-1 sp-submod2) 'b)
+(test 'lifted-decl dynamic-require '(submod 'check-splicing-stxparam-1 sp-submod3) 'b)
+(test 'lifted-decl dynamic-require '(submod 'check-splicing-stxparam-1 sp-submod4) 'b)
 
 (module check-splicing-stxparam-et racket/base
   (require (for-syntax racket/base)

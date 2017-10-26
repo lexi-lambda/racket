@@ -294,13 +294,22 @@
 (define-syntax (ssp-let-syntaxes stx)
   (syntax-case stx ()
     [(_ ([(id) rhs] ...) (orig-id ...) body ...)
-     (with-syntax ([(splicing-temp ...) (generate-temporaries #'(id ...))])
-       #'(begin
-           ;; Evaluate each RHS only once:
-           (define-syntax splicing-temp rhs) ...
-           ;; Partially expand `body' to push down `let-syntax':
-           (expand-ssp-body (id ...) (splicing-temp ...) (orig-id ...) body)
-           ...))]))
+     (if (and (eq? (syntax-local-context) 'module-begin)
+              (= 1 (length (syntax->list #'(body ...)))))
+         ;; In a 'module-begin context with a single subform, just recursively force expansion
+         (let ([ctx (syntax-local-make-definition-context #f #f)])
+           (for ([id (in-list (syntax->list #'(id ...)))]
+                 [rhs (in-list (syntax->list #'(rhs ...)))])
+             (syntax-local-bind-syntaxes (list id) rhs ctx))
+           (local-expand (car (syntax->list #'(body ...))) 'module-begin '() ctx))
+         ;; Otherwise, arrange to splice into the surrounding context
+         (with-syntax ([(splicing-temp ...) (generate-temporaries #'(id ...))])
+           #'(begin
+               ;; Evaluate each RHS only once:
+               (define-syntax splicing-temp rhs) ...
+               ;; Partially expand `body' to push down `let-syntax':
+               (expand-ssp-body (id ...) (splicing-temp ...) (orig-id ...) body)
+               ...)))]))
 
 (define-syntax (expand-ssp-body stx)
   (syntax-case stx ()
@@ -346,7 +355,7 @@
               [(module* name #f form ...)
                (datum->syntax body
                               (list #'module* #'name #f
-                                    #`(expand-ssp-module-begin
+                                    #`(expand-ssp-module*-begin
                                        (sp-id ...) (temp-id ...) (orig-id ...)
                                        #,body name form ...))
                               body)]
@@ -358,7 +367,7 @@
                       (letrec-syntaxes ([(sp-id) (syntax-local-value (quote-syntax temp-id))] ...)
                         expr))]))))]))
 
-(define-syntax (expand-ssp-module-begin stx)
+(define-syntax (expand-ssp-module*-begin stx)
   (syntax-case stx ()
     [(_ (sp-id ...) (temp-id ...) (orig-id ...) mod-form mod-name-id body-form ...)
      (unless (eq? (syntax-local-context) 'module-begin)
@@ -380,10 +389,8 @@
               [body (syntax-property body 'enclosing-module-name (syntax-e #'mod-name-id))]
               [body (local-expand body 'module-begin #f ctx)])
          (syntax-case body (#%plain-module-begin)
-           [(#%plain-module-begin form ...)
-            (syntax/loc/props body
-              (#%plain-module-begin
-               (expand-ssp-body (sp-id ...) (temp-id ...) (orig-id ...) form) ...))]
+           [(#%plain-module-begin . _)
+            (local-expand body 'module-begin '() ctx)]
            [_ (raise-syntax-error
                #f "expansion of #%module-begin is not a #%plain-module-begin form" body)])))]))
 
