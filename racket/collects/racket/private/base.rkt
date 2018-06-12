@@ -12,6 +12,7 @@
              "cert.rkt"
              "submodule.rkt"
              "generic-interfaces.rkt"
+             "local-exp.rkt"
              (for-syntax "stxcase-scheme.rkt"))
 
   (#%provide (all-from-except "pre-base.rkt"
@@ -24,8 +25,10 @@
                               with-output-to-file
                               directory-list
                               regexp-replace*
+                              local-expand
                               new-apply-proc)
              struct
+             (rename lexp local-expand)
              (all-from-except "hash.rkt" paired-fold)
              (all-from "list.rkt")
              (all-from-except "string.rkt" 
