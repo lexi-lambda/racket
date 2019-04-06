@@ -1,6 +1,7 @@
 #lang racket/base
 (require (for-syntax racket/base)
          "../common/struct-star.rkt"
+         "../common/contract.rkt"
          "../syntax/syntax.rkt"
          "../common/phase.rkt"
          "../syntax/scope.rkt"
@@ -11,7 +12,9 @@
          "main.rkt"
          "log.rkt"
          "free-id-set.rkt"
-         "stop-ids.rkt")
+         "stop-ids.rkt"
+         "reference-record.rkt"
+         "body.rkt")
 
 (provide add-intdef-scopes
          add-intdef-bindings
@@ -23,22 +26,23 @@
          internal-definition-context-binding-identifiers
          internal-definition-context-introduce
          internal-definition-context-seal
+         internal-definition-context-sealed?
          identifier-remove-from-definition-context
          
          make-local-expand-context
+         expand-and-split-intdefs
          flip-introduction-scopes
          flip-introduction-and-use-scopes
 
-         intdefs?
-         intdefs?-string
-         intdefs-or-false?
-         intdefs-or-false?-string)
+         check-intdef
+         check+normalize-intdefs)
 
 (struct internal-definition-context (frame-id      ; identifies the frame for use-site scopes
                                      scope         ; scope that represents the context
                                      add-scope?    ; whether the scope is auto-added for expansion
                                      env-mixins    ; bindings for this context: box of list of mix-binding
-                                     parent-ctx))  ; parent definition context or #f
+                                     parent-ctx    ; parent definition context or #f
+                                     [sealed? #:mutable])) ; whether the context has been used with `local-expand-expression`
 
 (struct env-mixin (id
                    sym
@@ -46,10 +50,8 @@
                    cache)) ; caches addition of binding to an existing environment
 
 ;; syntax-local-make-definition-context
-(define (syntax-local-make-definition-context [parent-ctx #f] [add-scope? #t])
-  (unless (or (not parent-ctx)
-              (internal-definition-context? parent-ctx))
-    (raise-argument-error 'syntax-local-make-definition-context "(or/c #f internal-definition-context?)" parent-ctx))
+(define/who (syntax-local-make-definition-context [parent-ctx #f] [add-scope? #t])
+  (check-intdef who parent-ctx #:allow-false? #t)
   (define ctx (get-current-expand-context 'syntax-local-make-definition-context))
   (define frame-id (or (root-expand-context-frame-id ctx)
                        (and parent-ctx (internal-definition-context-frame-id parent-ctx))
@@ -58,29 +60,26 @@
   (define def-ctx-scopes (expand-context-def-ctx-scopes ctx))
   (when def-ctx-scopes
     (set-box! def-ctx-scopes (cons sc (unbox def-ctx-scopes))))
-  (internal-definition-context frame-id sc add-scope? (box null) parent-ctx))
+  (internal-definition-context frame-id sc add-scope? (box null) parent-ctx #f))
 
 ;; syntax-local-bind-syntaxes
-(define (syntax-local-bind-syntaxes ids s intdef [extra-intdefs '()])
-  (unless (and (list? ids)
-               (andmap identifier? ids))
-    (raise-argument-error 'syntax-local-bind-syntaxes "(listof identifier?)" ids))
-  (unless (or (not s) (syntax? s))
-    (raise-argument-error 'syntax-local-bind-syntaxes "(or/c syntax? #f)" s))
-  (unless (internal-definition-context? intdef)
-    (raise-argument-error 'syntax-local-bind-syntaxes "internal-definition-context?" intdef))
-  (unless (intdefs? extra-intdefs)
-    (raise-argument-error 'syntax-local-bind-syntaxes intdefs?-string extra-intdefs))
+(define/who (syntax-local-bind-syntaxes ids s intdef [extra-intdefs '()])
+  (check who #:test (and (list? ids) (andmap identifier? ids)) #:contract "(listof identifier?)" ids)
+  (check who syntax? #:or-false s)
+  (check-intdef who intdef #:allow-sealed? #f)
+  (define extra-intdefs-lst (check+normalize-intdefs who extra-intdefs #:allow-sealed? #f #:allow-single? #t))
   (define ctx (get-current-expand-context 'local-expand))
+  (intdef-bind-syntaxes ctx ids s intdef extra-intdefs-lst)
+  (void))
+
+(define (intdef-bind-syntaxes ctx ids s intdef [extra-intdefs '()])
   (log-expand ctx 'local-bind ids)
   (define phase (expand-context-phase ctx))
-  (define all-intdefs (if (list? extra-intdefs)
-                          (cons intdef extra-intdefs)
-                          (list intdef extra-intdefs)))
+  (define all-intdefs (cons intdef extra-intdefs))
   (define intdef-ids (for/list ([id (in-list ids)])
                        (define pre-id (remove-use-site-scopes (flip-introduction-scopes id ctx)
                                                               ctx))
-                       (add-intdef-scopes (add-intdef-scopes pre-id intdef #:always? #t)
+                       (add-intdef-scopes (add-intdef-scopes pre-id (list intdef) #:always? #t)
                                           extra-intdefs)))
   (log-expand ctx 'rename-list intdef-ids)
   (define counter (root-expand-context-counter ctx))
@@ -92,19 +91,19 @@
   (define local-ctx
     (and s
          (let ()
-           (define tmp-env (for/fold ([env (expand-context-env ctx)]) ([sym (in-list syms)]
-                                                                       [intdef-id (in-list intdef-ids)])
+           (define tmp-env (for/fold ([env (expand-context-env ctx)])
+                                     ([sym (in-list syms)]
+                                      [intdef-id (in-list intdef-ids)])
                              (env-extend env sym (local-variable intdef-id))))
-           (make-local-expand-context (struct*-copy expand-context ctx
-                                                    [env tmp-env])
-                                      #:context 'expression
-                                      #:intdefs all-intdefs))))
+           (make-rhs-expand-context (struct*-copy expand-context ctx
+                                                  [env tmp-env])
+                                    #:intdefs all-intdefs))))
   (define vals
     (cond
      [s
       (define input-s (flip-introduction-scopes (add-intdef-scopes s all-intdefs) ctx))
       (log-expand ctx 'enter-bind)
-      (define vals (eval-for-syntaxes-binding 'syntax-local-bind-syntaxes input-s ids local-ctx))
+      (define vals (eval-for-syntaxes-binding 'syntax-local-bind-syntaxes input-s intdef-ids local-ctx))
       (log-expand ctx 'exit-bind)
       vals]
      [else
@@ -117,22 +116,20 @@
                                    (maybe-install-free=id-in-context! val intdef-id phase local-ctx))
                                  (env-mixin intdef-id sym val (make-weak-hasheq)))
                                (unbox env-mixins)))
-  (log-expand ctx 'exit-local-bind))
+  (log-expand ctx 'exit-local-bind)
+  (values intdef-ids syms))
 
 ;; internal-definition-context-binding-identifiers
-(define (internal-definition-context-binding-identifiers intdef)
-  (unless (internal-definition-context? intdef)
-    (raise-argument-error 'internal-definition-context-binding-identifiers "internal-definition-context?" intdef))
+(define/who (internal-definition-context-binding-identifiers intdef)
+  (check-intdef who intdef)
   (for/list ([env-mixin (in-list (unbox (internal-definition-context-env-mixins intdef)))])
     (env-mixin-id env-mixin)))
 
 ;; internal-definition-context-introduce
-(define (internal-definition-context-introduce intdef s [mode 'flip])
-  (unless (internal-definition-context? intdef)
-    (raise-argument-error 'internal-definition-context-introduce "internal-definition-context?" intdef))
-  (unless (syntax? s)
-    (raise-argument-error 'internal-definition-context-introduce "syntax?" s))
-  (add-intdef-scopes s intdef
+(define/who (internal-definition-context-introduce intdef s [mode 'flip])
+  (check-intdef who intdef)
+  (check who syntax? s)
+  (add-intdef-scopes s (list intdef)
                      #:always? #t
                      #:action (case mode
                                 [(add) add-scope]
@@ -144,61 +141,68 @@
                                        mode)])))
 
 ;; internal-definition-context-seal
-(define (internal-definition-context-seal intdef) 
-  (unless (internal-definition-context? intdef)
-    (raise-argument-error 'internal-definition-context-seal "internal-definition-context?" intdef))
+(define/who (internal-definition-context-seal intdef)
+  (check-intdef who intdef)
   (void))
 
 ;; identifier-remove-from-definition-context
-(define (identifier-remove-from-definition-context id intdef)
-  (unless (identifier? id)
-    (raise-argument-error 'identifier-remove-from-definition-context "identifier?" id))
-  (unless (or (internal-definition-context? intdef)
-              (and (list? intdef)
-                   (andmap internal-definition-context? intdef)))
-    (raise-argument-error 'identifier-remove-from-definition-context
-                          "(or/c internal-definition-context? (listof internal-definition-context?))"
-                          intdef))
-  (for/fold ([id id]) ([intdef (in-intdefs intdef)])
+(define/who (identifier-remove-from-definition-context id intdefs)
+  (check who identifier? id)
+  (define intdefs-lst (check+normalize-intdefs who intdefs #:allow-single? #t))
+  (for/fold ([id id]) ([intdef (in-list intdefs-lst)])
     (internal-definition-context-introduce intdef id 'remove)))
 
 ;; For contract errors:
-(define (intdefs? x)
-  (or (internal-definition-context? x)
-      (and (list? x)
-           (andmap internal-definition-context? x))))
-(define intdefs?-string
-  "(or/c internal-definition-context? (listof internal-definition-context?))")
-(define (intdefs-or-false? x)
-  (or (not x) (intdefs? x)))
-(define intdefs-or-false?-string
-  "(or/c internal-definition-context? (listof internal-definition-context?) #f)")
+(define intdef?-str "internal-definition-context?")
+(define intdef-not-sealed?-str "(and/c internal-definition-context? (not/c internal-definition-context-sealed?))")
 
-;; Sequence for intdefs provided to `local-expand`
-(define-sequence-syntax in-intdefs
-  (lambda (stx) (raise-syntax-error #f "only allowed in a `for` form" stx))
-  (lambda (stx)
-    (syntax-case stx ()
-      [[(d) (_ arg)]
-       #'[(d)
-          (:do-in
-           ([(x) (let ([a arg])
-                   (cond
-                    [(list? a) (reverse a)]
-                    [(not a) null]
-                    [else (list a)]))])
-           #t
-           ([a x])
-           (pair? a)
-           ([(d) (car a)])
-           #t
-           #t
-           ((cdr a)))]])))
+(define (check-intdef who intdef
+                      #:allow-sealed? [allow-sealed? #t]
+                      #:allow-false? [allow-false? #f])
+  (unless (or (and (internal-definition-context? intdef)
+                   (or allow-sealed? (not (internal-definition-context-sealed? intdef))))
+              (and allow-false? (not intdef)))
+    (define base-intdef?-str (if allow-sealed? intdef?-str intdef-not-sealed?-str))
+    (raise-argument-error who (string-append "(or/c " base-intdef?-str " #f)") intdef)))
+
+;; Normalizes an intdefs argument that could be false or a single intdef to a list.
+(define (check+normalize-intdefs who intdefs
+                                 #:allow-sealed? [allow-sealed? #t]
+                                 #:allow-false? [allow-false? #f]
+                                 #:allow-single? [allow-single? #f])
+  (define (fail)
+    (define base-intdef?-str (if allow-sealed? intdef?-str intdef-not-sealed?-str))
+    (define intdefs?-str (string-append "(listof " base-intdef?-str ")"))
+    (define contract-str
+      (cond
+        [(and (not allow-false?) (not allow-single?))
+         intdefs?-str]
+        [allow-single?
+         (string-append "(or/c " base-intdef?-str "\n"
+                        "      " intdefs?-str
+                        (if allow-false? "\n      #f)" ")"))]
+        [allow-false?
+         (string-append "(or/c " intdefs?-str " #f)")]
+        [else
+         intdefs?-str]))
+    (raise-argument-error who contract-str intdefs))
+  (cond
+    [(not intdefs)
+     (if allow-false? '() (fail))]
+    [else
+     (define (base-intdef? v)
+       (and (internal-definition-context? v)
+            (or allow-sealed? (not (internal-definition-context-sealed? v)))))
+     (cond
+       [(list? intdefs)
+        (if (andmap base-intdef? intdefs) intdefs (fail))]
+       [else
+        (if (and allow-single? (base-intdef? intdefs)) (list intdefs) (fail))])]))
 
 (define (add-intdef-bindings env intdefs)
-  (for/fold ([env env]) ([intdef (in-intdefs intdefs)])
+  (for/fold ([env env]) ([intdef (in-list intdefs)])
     (define parent-ctx (internal-definition-context-parent-ctx intdef))
-    (define parent-env (if parent-ctx (add-intdef-bindings env parent-ctx) env))
+    (define parent-env (if parent-ctx (add-intdef-bindings env (list parent-ctx)) env))
     (define env-mixins (unbox (internal-definition-context-env-mixins intdef)))
     (let loop ([env parent-env] [env-mixins env-mixins])
       (cond
@@ -215,9 +219,9 @@
 (define (add-intdef-scopes s intdefs
                            #:always? [always? #f]
                            #:action [action add-scope])
-  (for/fold ([s s]) ([intdef (in-intdefs intdefs)]
+  (for/fold ([s s]) ([intdef (in-list intdefs)]
                      #:when (or always?
-                                (internal-definition-context-add-scope? intdef)))
+                        (internal-definition-context-add-scope? intdef)))
     (action s (internal-definition-context-scope intdef))))
 
 ;; ----------------------------------------
@@ -253,7 +257,7 @@
                           ;; If there are multiple definition contexts in `intdefs`
                           ;; and if they have different frame IDs, then we conservatively
                           ;; turn on use-site scopes for all frame IDs
-                          (for/fold ([frame-id (root-expand-context-frame-id ctx)]) ([intdef (in-intdefs intdefs)])
+                          (for/fold ([frame-id (root-expand-context-frame-id ctx)]) ([intdef (in-list intdefs)])
                             (define i-frame-id (internal-definition-context-frame-id intdef))
                             (cond
                              [(and frame-id i-frame-id (not (eq? frame-id i-frame-id)))
@@ -293,6 +297,63 @@
                                              [else
                                               ;; keep disallowing unbound references
                                               #f]))]))
+
+(define (make-rhs-expand-context ctx
+                                 #:intdefs intdefs
+                                 #:frame-id [frame-id #f])
+  (define intdef-idss (and frame-id (map internal-definition-context-binding-identifiers intdefs)))
+  (define def-ctx-scopes (expand-context-def-ctx-scopes ctx))
+  (define use-site-scopes (root-expand-context-use-site-scopes ctx))
+  (struct*-copy expand-context (as-expression-context ctx)
+                [env (add-intdef-bindings (expand-context-env ctx) intdefs)]
+                [def-ctx-scopes #f]
+                [use-site-scopes #:parent root-expand-context #f]
+                [scopes (append (if def-ctx-scopes (unbox def-ctx-scopes) '())
+                                (if use-site-scopes (unbox use-site-scopes) '())
+                                (expand-context-scopes ctx))]
+                [reference-records (if frame-id
+                                       (cons frame-id (expand-context-reference-records ctx))
+                                       (expand-context-reference-records ctx))]
+                [binding-layer (if frame-id
+                                   (increment-binding-layer intdef-idss ctx frame-id)
+                                   (expand-context-binding-layer ctx))]
+                [only-immediate? #f]
+                [just-once? #f]
+                [in-local-expand? #t]
+                [keep-#%expression? #f]
+                [stops empty-free-id-set]
+                [current-introduction-scopes '()]))
+
+(define (expand-and-split-intdefs ctx
+                                  #:intdefs intdefs
+                                  #:value-bindings value-bindings
+                                  #:get-body get-body-in-ctx)
+  (define first-intdef (car intdefs))
+  (define-values (idss keyss rhss track-stxs)
+    (for/lists (idss keyss rhss track-stxs)
+               ([binding (in-list value-bindings)])
+      (define ids (for/list ([id (in-list (car binding))])
+                    (add-intdef-scopes id intdefs #:always? #t)))
+      (define-values (intdef-ids keys) (intdef-bind-syntaxes ctx ids #f first-intdef))
+      (values intdef-ids
+              keys
+              (flip-introduction-scopes (add-intdef-scopes (cdr binding) intdefs) ctx)
+              #f)))
+  (for ([intdef (in-list intdefs)])
+    (set-internal-definition-context-sealed?! intdef #t))
+
+  (define frame-id (make-reference-record))
+  (define rhs-ctx (make-rhs-expand-context ctx #:intdefs intdefs #:frame-id frame-id))
+
+  (define (get-body)
+    (list (get-body-in-ctx (struct*-copy expand-context (as-tail-context rhs-ctx #:wrt ctx)
+                                         [reference-records (expand-context-reference-records ctx)]))))
+  (expand-and-split-bindings-by-reference
+   idss keyss rhss track-stxs
+   #:split? #t
+   #:frame-id frame-id #:ctx rhs-ctx
+   #:source empty-syntax #:had-stxes? #t
+   #:get-body get-body #:track? #f))
 
 ;; ----------------------------------------
 
