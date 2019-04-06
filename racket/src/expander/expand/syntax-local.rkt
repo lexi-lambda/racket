@@ -164,13 +164,13 @@
                                #:immediate? immediate?)
   (check who identifier? id)
   (check who #:or-false (procedure-arity-includes/c 0) failure-thunk)
-  (check who intdefs-or-false? #:contract intdefs-or-false?-string intdefs)
+  (define intdefs-lst (check+normalize-intdefs who intdefs #:allow-single? #t #:allow-false? #t))
   (define current-ctx (get-current-expand-context who))
-  (define ctx (if intdefs
+  (define ctx (if (null? intdefs)
+                  current-ctx
                   (struct*-copy expand-context current-ctx
                                 [env (add-intdef-bindings (expand-context-env current-ctx)
-                                                          intdefs)])
-                  current-ctx))
+                                                          intdefs-lst)])))
   (log-expand ctx 'local-value id)
   (define phase (expand-context-phase ctx))
   (let loop ([id (flip-introduction-scopes id ctx)])
