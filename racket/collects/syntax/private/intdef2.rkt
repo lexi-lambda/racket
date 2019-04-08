@@ -26,12 +26,6 @@
   ;; -------------------------------------------------------------------------------------------------
   ;; helper functions
 
-  (define make-liberal-define-context
-    (let ()
-      (struct liberal-define-context ()
-        #:property prop:liberal-define-context #t)
-      (lambda () (liberal-define-context))))
-
   (struct opaque-box (value))
 
   (define (local-apply-transformer/any-result proc stx context intdefs)
@@ -103,11 +97,77 @@
     (and ids (member id ids bound-identifier=?)))
 
   ;; -------------------------------------------------------------------------------------------------
+
+  (define (ordinal n)
+    (define suffix
+      (if (= (remainder (quotient n 10) 10) 1)
+          "th"
+          (case (remainder n 10)
+            [(1) "st"]
+            [(2) "nd"]
+            [(3) "rd"]
+            [else "th"])))
+    (format "~a~a" n suffix))
+
+  (struct base-splice-context (splice!-proc keyword-ids)
+    #:reflection-name 'splice-context
+    #:constructor-name make-splice-context
+    #:property prop:liberal-define-context #t)
+
+  (define-values [prop:splice-context has-splice-context? splice-context-ref]
+    (make-struct-type-property
+     'splice-context
+     (lambda (val info)
+       (define (check-splice-context self ctx given in where)
+         (unless (splice-context? ctx)
+           (raise-arguments-error 'prop:splice-context
+                                  "expected" (unquoted-printing-string "splice-context?")
+                                  given ctx
+                                  in (format "the ~a ~e" where self)))
+         (extract-splice-context ctx))
+       (cond
+         [(exact-nonnegative-integer? val)
+          (define field-count (+ (list-ref info 1) (list-ref info 2)))
+          (unless (val . < . field-count)
+            (raise-arguments-error 'prop:splice-context
+                                   "field index >= field count for structure type"
+                                   "field index" val
+                                   "field count" field-count))
+          (define self-ref (list-ref info 3))
+          (lambda (self) (check-splice-context self (self-ref self val) "found" "in"
+                                               (format "~a field of" (ordinal val))))]
+         [(splice-context? val)
+          (lambda (self) (extract-splice-context val))]
+         [(and (procedure? val)
+               (procedure-arity-includes? val 1))
+          (lambda (self) (check-splice-context self (val self) "received" "from"
+                                               (format "~e procedure associated with" val)))]
+         [else
+          (raise-argument-error 'prop:splice-context
+                                (string-append "(or/c exact-nonnegative-integer?\n"
+                                               "      splice-context?\n"
+                                               "      (-> any/c splice-context?))")
+                                val)]))))
+
+  (define (splice-context? val)
+    (or (base-splice-context? val)
+        (has-splice-context? val)))
+
+  (define (extract-splice-context val)
+    (if (base-splice-context? val)
+        val
+        ((splice-context-ref val) val)))
+
+  (define-values [prop:definition-context definition-context? definition-context-ref]
+    (make-struct-type-property 'definition-context))
+
+  ;; -------------------------------------------------------------------------------------------------
   ;; core definitions
 
   (struct internal-definition-context (intdef
+                                       keyword-ids
+                                       [expand-ctx #:mutable] ; mutable for knot-tying self-reference
                                        [prune-scopes-proc #:mutable]
-                                       expand-ctx
                                        bound-ids
                                        [val-bindings #:mutable]
                                        [final-exprs #:mutable]
@@ -116,8 +176,22 @@
                                        [disappeared-ids #:mutable]
                                        [track-stxs #:mutable]))
 
+  (define (internal-definition-context-initialize! intdef)
+    (set-internal-definition-context-expand-ctx!
+     intdef (make-splice-context
+             (lambda (stx) (internal-definition-context-add-scopes-to-prune! intdef stx))
+             (internal-definition-context-keyword-ids intdef))))
+
+  (define (internal-definition-context-add-scopes-to-prune! intdef added-scopes-to-prune)
+    (define added-prune-scopes-proc (make-syntax-delta-introducer added-scopes-to-prune #f))
+    (define old-prune-scopes-proc (internal-definition-context-prune-scopes-proc intdef))
+    (define old-scopes-to-prune (old-prune-scopes-proc scopeless-stx 'add))
+    (define new-scopes-to-prune (added-prune-scopes-proc old-scopes-to-prune 'add))
+    (define new-prune-scopes-proc (make-syntax-delta-introducer new-scopes-to-prune #f))
+    (set-internal-definition-context-prune-scopes-proc! intdef new-prune-scopes-proc))
+
   (define (internal-definition-context-prune-scopes intdef stx)
-    ((internal-definition-context-prune-scopes-proc intdef) stx))
+    ((internal-definition-context-prune-scopes-proc intdef) stx 'add))
 
   (define (internal-definition-context-prune-from! intdef pruned-intdef)
     (define old-prune-scopes-proc (internal-definition-context-prune-scopes-proc intdef))
@@ -144,10 +218,16 @@
   ;; -------------------------------------------------------------------------------------------------
   ;; public API
 
-  (define (syntax-local-make-internal-definition-context)
+  (define (syntax-local-make-internal-definition-context #:keywords [keyword-ids '()])
+    (define unique-keyword-ids
+      (for/lists (seen)
+                 ([keyword-id (in-list keyword-ids)]
+                  #:unless (member keyword-id (kernel-form-identifier-list) free-identifier=?)
+                  #:unless (member keyword-id seen free-identifier=?))
+        keyword-id))
     (internal-definition-context (racket:syntax-local-make-definition-context)
+                                 (list (make-splice-context))
                                  (lambda (stx) stx)
-                                 (list (make-liberal-define-context))
                                  (mutable-bound-id-set)
                                  '() '() #f '() '() '()))
 
@@ -441,3 +521,15 @@
                                                               #:compile bind-redirect
                                                               #:extra-intdefs (list intdef)))
           (syntax-local-internal-definition-context-finish! local-intdef #:context stx))]))))
+
+
+;; ---------------------------------------------------------------------------------------------------
+
+(begin-for-syntax
+  (struct splicing-definition-context ([form-stxs #:mutable]))
+
+  (define (make-splicing-definition-context)
+    (splicing-definition-context '()))
+
+  (define (splicing-definition-context-extend! spldef stx)
+    ))
