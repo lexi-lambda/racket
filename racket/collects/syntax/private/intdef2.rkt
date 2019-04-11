@@ -34,11 +34,7 @@
   (define (intdef-syntax-arm stx [use-mode? #f])
     (syntax-arm stx intdef-inspector use-mode?))
 
-  (define make-liberal-define-context
-    (let ()
-      (struct liberal-define-context ()
-        #:property prop:liberal-define-context #t)
-      (lambda () (liberal-define-context))))
+  (define scopeless-stx (datum->syntax #f #f))
 
   (struct opaque-box (value))
 
@@ -111,11 +107,88 @@
     (and ids (member id ids bound-identifier=?)))
 
   ;; -------------------------------------------------------------------------------------------------
+  ;; splice contexts
+
+  #;(define (ordinal n)
+    (define suffix
+      (if (= (remainder (quotient n 10) 10) 1)
+          "th"
+          (case (remainder n 10)
+            [(1) "st"]
+            [(2) "nd"]
+            [(3) "rd"]
+            [else "th"])))
+    (format "~a~a" n suffix))
+
+  #;(struct base-splice-context (splice-id unsplice-id)
+    #:reflection-name 'splice-context
+    #:constructor-name make-splice-context
+    #:property prop:liberal-define-context #t)
+
+  #;(define-values [prop:splice-context has-splice-context? splice-context-ref]
+    (make-struct-type-property
+     'splice-context
+     (lambda (val info)
+       (define (check-splice-context self ctx given in where)
+         (unless (splice-context? ctx)
+           (raise-arguments-error 'prop:splice-context
+                                  "expected" (unquoted-printing-string "splice-context?")
+                                  given ctx
+                                  in (format "the ~a ~e" where self)))
+         (extract-splice-context ctx))
+       (cond
+         [(exact-nonnegative-integer? val)
+          (define field-count (+ (list-ref info 1) (list-ref info 2)))
+          (unless (val . < . field-count)
+            (raise-arguments-error 'prop:splice-context
+                                   "field index >= field count for structure type"
+                                   "field index" val
+                                   "field count" field-count))
+          (define self-ref (list-ref info 3))
+          (lambda (self) (check-splice-context self (self-ref self val) "found" "in"
+                                               (format "~a field of" (ordinal val))))]
+         [(splice-context? val)
+          (lambda (self) (extract-splice-context val))]
+         [(and (procedure? val)
+               (procedure-arity-includes? val 1))
+          (lambda (self) (check-splice-context self (val self) "received" "from"
+                                               (format "~e procedure associated with" val)))]
+         [else
+          (raise-argument-error 'prop:splice-context
+                                (string-append "(or/c exact-nonnegative-integer?\n"
+                                               "      splice-context?\n"
+                                               "      (-> any/c splice-context?))")
+                                val)]))))
+
+  (define-values [prop:splice-context splice-context? splice-context-ref]
+    (make-struct-type-property 'splice-context))
+
+  (define-values [make-expand-context make-splice-expand-context]
+    (let ()
+      (struct expand-context ()
+        #:constructor-name make-expand-context
+        #:property prop:liberal-define-context #t)
+      (struct splice-context expand-context ()
+        #:constructor-name make-splice-expand-context
+        #:property prop:splice-context #t)
+      (values make-expand-context
+              make-splice-expand-context)))
+
+  #;(define (splice-context? val)
+    (or (base-splice-context? val)
+        (has-splice-context? val)))
+
+  #;(define (extract-splice-context val)
+    (if (base-splice-context? val)
+        val
+        ((splice-context-ref val) val)))
+
+  ;; -------------------------------------------------------------------------------------------------
   ;; core definitions
 
   (struct internal-definition-context (intdef
                                        [sealed? #:mutable]
-                                       [prune-scopes-proc #:mutable]
+                                       [prune-introducer #:mutable]
                                        expand-ctx
                                        bound-ids
                                        [val-bindings #:mutable]
@@ -129,14 +202,22 @@
     (set-internal-definition-context-sealed?! intdef #t))
 
   (define (internal-definition-context-prune-scopes intdef stx)
-    ((internal-definition-context-prune-scopes-proc intdef) stx))
+    ((internal-definition-context-prune-introducer intdef) stx 'remove))
 
-  (define (internal-definition-context-prune-from! intdef pruned-intdef)
-    (define old-prune-scopes-proc (internal-definition-context-prune-scopes-proc intdef))
-    (set-internal-definition-context-prune-scopes-proc!
-     intdef
-     (lambda (stx)
-       (old-prune-scopes-proc (internal-definition-context-introduce pruned-intdef stx 'remove)))))
+  (define (internal-definition-context-add-prune-introducer! intdef new-prune-introducer)
+    (define old-prune-scopes-proc (internal-definition-context-prune-introducer intdef))
+    (define old-scopes-to-prune (old-prune-scopes-proc scopeless-stx 'add))
+    (define new-scopes-to-prune (new-prune-introducer old-scopes-to-prune 'add))
+    (define new-prune-scopes-proc (make-syntax-delta-introducer new-scopes-to-prune #f))
+    (set-internal-definition-context-prune-introducer! intdef new-prune-scopes-proc))
+
+  (define (internal-definition-context-add-scopes-to-prune! intdef new-scopes-to-prune)
+    (internal-definition-context-add-prune-introducer!
+     intdef (make-syntax-delta-introducer new-scopes-to-prune #f)))
+
+  (define (internal-definition-context-add-intdef-to-prune! intdef pruned-intdef)
+    (internal-definition-context-add-prune-introducer!
+     intdef (lambda (stx mode) (internal-definition-context-introduce pruned-intdef stx mode))))
 
   (define (internal-definition-context-add-expr! intdef stx #:introduce? introduce?)
     (define prev-exprs (internal-definition-context-final-exprs intdef))
@@ -156,11 +237,27 @@
   ;; -------------------------------------------------------------------------------------------------
   ;; public API
 
-  (define (syntax-local-make-internal-definition-context)
+  (define (syntax-local-make-internal-definition-context
+           #:allow-liberal-expansion? [allow-liberal-expansion? #t]
+           #:allow-splicing? [allow-splicing? #t])
+
+    (define-values [struct:intdef-expand-context
+                    make-intdef-expand-context
+                    intdef-expand-context?
+                    intdef-expand-context-ref
+                    intdef-expand-context-set!]
+      (make-struct-type 'internal-definition-expand-context #f 0 0 #f
+                        (append (if allow-liberal-expansion?
+                                    (list (cons prop:liberal-define-context #t))
+                                    '())
+                                (if allow-splicing?
+                                    (list (cons prop:splice-context #t))
+                                    '()))))
+
     (internal-definition-context (racket:syntax-local-make-definition-context)
                                  #f
                                  (lambda (stx) stx)
-                                 (list (make-liberal-define-context))
+                                 (make-intdef-expand-context)
                                  (mutable-bound-id-set)
                                  '() '() '() #f '() '()))
 
@@ -467,7 +564,7 @@
         (let ()
           (define intdef (check-literal-intdef #'intdef-stx #:context stx))
           (define local-intdef (syntax-local-make-internal-definition-context))
-          (internal-definition-context-prune-from! intdef local-intdef)
+          (internal-definition-context-add-intdef-to-prune! intdef local-intdef)
           (define (bind-redirect stx)
             (syntax-case stx ()
               [(define-id [x ...] _)
@@ -487,3 +584,38 @@
                                                               #:compile bind-redirect
                                                               #:extra-intdefs (list intdef)))
           (internal-definition-context-finish! local-intdef #:context stx))]))))
+
+;; ---------------------------------------------------------------------------------------------------
+
+(define-for-syntax (splicing-form-transformer stx)
+  (raise-syntax-error #f
+                      (if (eq? (syntax-local-context) 'expression)
+                          "not in a definition context"
+                          "not in a definition context that supports splicing")
+                      stx))
+
+(define-syntaxes [#%splice #%unsplice]
+  (values splicing-form-transformer splicing-form-transformer))
+
+(begin-for-syntax
+  (struct splicing-definition-context (introducer
+                                       [sealed? #:mutable]
+                                       [form-stxs #:mutable]))
+
+  (define (make-splicing-definition-context)
+    (splicing-definition-context (make-syntax-introducer #t) #f '()))
+
+  (define (splicing-definition-context-extend! spldef stx
+                                               #:local? [local? #f]
+                                               #:introduce? [introduce? (syntax-transforming?)])
+    (define introduced-stx (if local? (splicing-definition-context)))
+    (set-splicing-definition-context-form-stxs!
+     spldef (cons (maybe-syntax-local-introduce introduce? stx)
+                  (splicing-definition-context-form-stxs spldef))))
+
+  (define (splicing-definition-context-finish! spldef
+                                               #:introduce? [introduce? (syntax-transforming?)])
+    (set-splicing-definition-context-sealed?! spldef #t)
+    (intdef-syntax-arm
+     #`(splice
+        ))))
