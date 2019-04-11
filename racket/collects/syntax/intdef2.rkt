@@ -27,6 +27,11 @@
              (-> internal-definition-context? primitive-internal-definition-context?)]
             [internal-definition-context-introduce
              (->* [internal-definition-context? syntax?] [(or/c 'flip 'add 'remove)] syntax?)]
+            [internal-definition-context-finish!
+             (->* [(and/c internal-definition-context? (not/c internal-definition-context-sealed?))]
+                  [#:context (or/c syntax? #f)]
+                  #:pre (syntax-transforming?/precondition)
+                  syntax?)]
             [syntax-local-make-internal-definition-context
              (->* [] #:pre (syntax-transforming?/precondition) internal-definition-context?)]
             [syntax-local-expand-in-internal-definition-context
@@ -47,11 +52,6 @@
                    #:introduce? any/c]
                   #:pre (syntax-transforming?/precondition)
                   void?)]
-            [syntax-local-internal-definition-context-finish!
-             (->* [(and/c internal-definition-context? (not/c internal-definition-context-sealed?))]
-                  [#:context (or/c syntax? #f)]
-                  #:pre (syntax-transforming?/precondition)
-                  syntax?)]
             [syntax-local-value
              (->* [identifier?]
                   [(or/c (-> any) #f)

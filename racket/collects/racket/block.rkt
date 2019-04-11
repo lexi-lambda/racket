@@ -18,4 +18,4 @@
         (syntax-local-internal-definition-context-extend! intdef defn-or-expr))
       (unless (internal-definition-context-ends-in-expression? intdef)
         (syntax-local-internal-definition-context-extend! intdef #'(void)))
-      (syntax-local-internal-definition-context-finish! intdef #:context this-syntax)])))
+      (internal-definition-context-finish! intdef #:context this-syntax)])))

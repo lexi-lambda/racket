@@ -1,8 +1,12 @@
 #lang racket/base
 
-(require (for-syntax racket/base
+(require (for-meta 2 racket/base)
+         (for-syntax racket/base
                      (prefix-in racket: racket/base)
-                     (only-in racket/syntax current-syntax-context)
+                     (only-in racket/syntax
+                              current-syntax-context
+                              syntax-local-eval
+                              with-syntax*)
                      syntax/apply-transformer
                      syntax/kerncase
                      syntax/transformer))
@@ -14,10 +18,10 @@
                      internal-definition-context-sealed?
                      internal-definition-context->primitive-internal-definition-context
                      internal-definition-context-introduce
+                     internal-definition-context-finish!
                      syntax-local-make-internal-definition-context
                      syntax-local-expand-in-internal-definition-context
                      syntax-local-internal-definition-context-extend!
-                     syntax-local-internal-definition-context-finish!
                      syntax-local-value)
          #%expression/internal-definition-context
          block/internal-definition-context)
@@ -25,6 +29,10 @@
 (begin-for-syntax
   ;; -------------------------------------------------------------------------------------------------
   ;; helper functions
+
+  (define intdef-inspector (variable-reference->module-declaration-inspector (#%variable-reference)))
+  (define (intdef-syntax-arm stx [use-mode? #f])
+    (syntax-arm stx intdef-inspector use-mode?))
 
   (define make-liberal-define-context
     (let ()
@@ -106,15 +114,19 @@
   ;; core definitions
 
   (struct internal-definition-context (intdef
+                                       [sealed? #:mutable]
                                        [prune-scopes-proc #:mutable]
                                        expand-ctx
                                        bound-ids
                                        [val-bindings #:mutable]
+                                       [stx-bindings #:mutable]
                                        [final-exprs #:mutable]
                                        [ends-in-definition? #:mutable]
                                        [orig-stxs #:mutable]
-                                       [disappeared-ids #:mutable]
                                        [track-stxs #:mutable]))
+
+  (define (internal-definition-context-seal! intdef)
+    (set-internal-definition-context-sealed?! intdef #t))
 
   (define (internal-definition-context-prune-scopes intdef stx)
     ((internal-definition-context-prune-scopes-proc intdef) stx))
@@ -146,10 +158,11 @@
 
   (define (syntax-local-make-internal-definition-context)
     (internal-definition-context (racket:syntax-local-make-definition-context)
+                                 #f
                                  (lambda (stx) stx)
                                  (list (make-liberal-define-context))
                                  (mutable-bound-id-set)
-                                 '() '() #f '() '() '()))
+                                 '() '() '() #f '() '()))
 
   (define (internal-definition-context-empty? intdef)
     (and (not (internal-definition-context-ends-in-definition? intdef))
@@ -157,9 +170,6 @@
 
   (define (internal-definition-context-ends-in-expression? intdef)
     (not (null? (internal-definition-context-final-exprs intdef))))
-
-  (define (internal-definition-context-sealed? intdef)
-    (racket:internal-definition-context-sealed? (internal-definition-context-intdef intdef)))
 
   (define (internal-definition-context->primitive-internal-definition-context intdef)
     (internal-definition-context-intdef intdef))
@@ -208,8 +218,12 @@
 
     (cond
       [syntaxes?
-       (set-internal-definition-context-disappeared-ids!
-        intdef (append intdef-ids (internal-definition-context-disappeared-ids intdef)))]
+       (define old-stx-bindings (internal-definition-context-stx-bindings intdef))
+       (define new-stx-bindings (for/list ([intdef-id (in-list intdef-ids)])
+                                  (cons intdef-id (syntax-local-value intdef-id #f (list intdef)
+                                                                      #:immediate? #t))))
+       (set-internal-definition-context-stx-bindings!
+        intdef (append (reverse new-stx-bindings) old-stx-bindings))]
       [else
        (define old-val-bindings (internal-definition-context-val-bindings intdef))
        (define new-val-binding (cons intdef-ids (maybe-introduce rhs)))
@@ -220,7 +234,7 @@
             (cons new-val-binding old-val-bindings)]
            [else
             (set-internal-definition-context-final-exprs! intdef '())
-            (define intermediate-exprs-binding (cons '() #`(begin #,@exprs (values))))
+            (define intermediate-exprs-binding (cons '() #`(begin #,@(reverse exprs) (values))))
             (cons new-val-binding (cons intermediate-exprs-binding old-val-bindings))]))
        (set-internal-definition-context-val-bindings! intdef all-val-bindings)]))
 
@@ -364,9 +378,9 @@
           [else
            (handle-expression)]))))
 
-  (define (syntax-local-internal-definition-context-finish!
-           intdef
-           #:context [context-stx (current-syntax-context)])
+  (define (internal-definition-context-finish! intdef
+                                               #:context [context-stx (current-syntax-context)]
+                                               #:introduce? [introduce? (syntax-transforming?)])
     (define body-exprs (internal-definition-context-final-exprs intdef))
 
     (define last-was-defn? (internal-definition-context-ends-in-definition? intdef))
@@ -383,27 +397,59 @@
                           #f
                           orig-stxs))
 
-    (define body-expr #`(begin #,@(map syntax-local-introduce (reverse body-exprs))))
+    (define maybe-introduce (maybe-syntax-local-introduce introduce?))
+
+    (define stx-bindings (reverse (internal-definition-context-stx-bindings intdef)))
     (define val-bindings (reverse (internal-definition-context-val-bindings intdef)))
-    (define introduced-val-bindings (for/list ([val-binding (in-list val-bindings)])
-                                      (cons (map syntax-local-introduce (car val-binding))
-                                            (syntax-local-introduce (cdr val-binding)))))
 
-    (define-values [ignored opaque-stx]
-      (syntax-local-expand-expression body-expr #t
-                                      #:intdefs (list (internal-definition-context-intdef intdef))
-                                      #:value-bindings introduced-val-bindings))
+    (define wrapped-stx
+      (with-syntax* (;; preserve stx bindings under quote to avoid both re-expansion and
+                     ;; re-evaluation
+                     [([stx-id quoted-stx-val] ...)
+                      (let ([introducer (make-syntax-introducer)])
+                        (for/list ([stx-binding (in-list stx-bindings)])
+                          (list (maybe-introduce (car stx-binding))
+                                #`'#,(cdr stx-binding))))]
 
-    (define tracked-stx
-      (for/fold ([result-stx opaque-stx])
+                     [([(val-id ...) val-rhs] ...)
+                      (for/list ([val-binding (in-list val-bindings)])
+                        (list (map maybe-introduce (car val-binding))
+                              (maybe-introduce (cdr val-binding))))]
+                     [opaque-val-ids-expr
+                      #`(opaque-box-value '#,(opaque-box (syntax->list #'[val-id ... ...])))]
+                     [(body-expr ...) (map maybe-introduce (reverse body-exprs))])
+        #`(letrec-syntaxes+values
+           ([(stx-id ...) (begin (internal-definition-context-redirect-bindings!
+                                  '#,intdef
+                                  opaque-val-ids-expr
+                                  (list (quote-syntax val-id) ... ...))
+                                 (values quoted-stx-val ...))])
+           ([(val-id ...) val-rhs] ...)
+            (#%expression (begin body-expr ...)))))
+
+    (define origin-tracked-stx
+      (for/fold ([result-stx wrapped-stx])
                 ([track-stx (in-list (internal-definition-context-track-stxs intdef))])
         (syntax-track-origin result-stx (cdr track-stx) (car track-stx))))
-    (define old-disappeared-bindings (syntax-property tracked-stx 'disappeared-binding))
-    (define new-disappeared-bindings (internal-definition-context-disappeared-ids intdef))
-    (syntax-property tracked-stx 'disappeared-binding (if old-disappeared-bindings
-                                                          (cons new-disappeared-bindings
-                                                                old-disappeared-bindings)
-                                                          new-disappeared-bindings))))
+    (define old-disappeared-bindings (syntax-property origin-tracked-stx 'disappeared-binding))
+    (define new-disappeared-bindings (map car stx-bindings))
+    (define tracked-stx (syntax-property origin-tracked-stx 'disappeared-binding
+                                         (if old-disappeared-bindings
+                                             (cons new-disappeared-bindings old-disappeared-bindings)
+                                             new-disappeared-bindings)))
+
+    (internal-definition-context-seal! intdef)
+    (intdef-syntax-arm tracked-stx))
+
+  (define (make-rename-transformers ids)
+    (apply values (map make-rename-transformer ids)))
+
+  (define (internal-definition-context-redirect-bindings! intdef internal-val-ids external-val-ids)
+    (with-syntax ([(external-val-id ...) external-val-ids])
+      (syntax-local-bind-syntaxes (map syntax-local-introduce internal-val-ids)
+                                  #`(make-rename-transformers
+                                     (list (quote-syntax external-val-id) ...))
+                                  (internal-definition-context-intdef intdef)))))
 
 (define-syntax #%expression/internal-definition-context
   (make-expression-transformer
@@ -411,7 +457,7 @@
      (syntax-case stx ()
        [(_ intdef-stx)
         (let ([intdef (check-literal-intdef #'intdef-stx #:context stx)])
-          (syntax-local-internal-definition-context-finish! intdef #:context stx))]))))
+          (internal-definition-context-finish! intdef #:context stx))]))))
 
 (define-syntax block/internal-definition-context
   (make-expression-transformer
@@ -440,4 +486,4 @@
             (syntax-local-internal-definition-context-extend! local-intdef defn-or-expr
                                                               #:compile bind-redirect
                                                               #:extra-intdefs (list intdef)))
-          (syntax-local-internal-definition-context-finish! local-intdef #:context stx))]))))
+          (internal-definition-context-finish! local-intdef #:context stx))]))))
