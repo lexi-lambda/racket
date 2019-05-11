@@ -46,6 +46,7 @@ language.
                                racket/private/stx
                                racket/private/map
                                racket/private/list
+                               racket/private/kw-syntax-local
                                racket/private/base)]{
 
 Unless otherwise noted, the bindings defined in this manual are
@@ -125,16 +126,16 @@ The @racketmodname[racket] library combines
              #:location "International Conference on Functional Programming (ICFP)"
              #:date "2002")
 
-  (bib-entry #:key "Friedman95"
-             #:title "Exception system proposal"
-             #:author "Daniel P. Friedman, C. T. Haynes, and R. Kent Dybvig"
+  (bib-entry #:key "Friedman95" 
+             #:title "Exception system proposal" 
+             #:author "Daniel P. Friedman, C. T. Haynes, and R. Kent Dybvig" 
              #:location "web page"
              #:url "http://www.cs.indiana.edu/scheme-repository/doc.proposals.exceptions.html"
              #:date "1995")
 
-  (bib-entry #:key "Gasbichler02"
-             #:title "Processes vs. User-Level Threads in Scsh"
-             #:author "Martin Gasbichler and Michael Sperber"
+  (bib-entry #:key "Gasbichler02" 
+             #:title "Processes vs. User-Level Threads in Scsh" 
+             #:author "Martin Gasbichler and Michael Sperber" 
              #:date "2002"
              #:location "Workshop on Scheme and Functional Programming")
 
@@ -155,13 +156,13 @@ The @racketmodname[racket] library combines
             #:title "Engines Build Process Abstractions"
             #:location "Symposium on LISP and Functional Programming"
             #:date "1984")
-
+ 
  (bib-entry #:key "Hayes97"
             #:author "Barry Hayes"
             #:title "Ephemerons: a New Finalization Mechanism"
             #:location "Object-Oriented Languages, Programming, Systems, and Applications"
             #:date "1997")
-
+ 
  (bib-entry #:key "Hieb90"
             #:author "Robert Hieb and R. Kent Dybvig"
             #:title "Continuations and Concurrency"
@@ -198,10 +199,10 @@ The @racketmodname[racket] library combines
              #:location @italic{Lisp and Symbolic Computation}
              #:date "1990")
 
-  (bib-entry #:key "Sitaram93"
-             #:title "Handling Control"
+  (bib-entry #:key "Sitaram93" 
+             #:title "Handling Control" 
              #:author "Dorai Sitaram"
-             #:location "Programming Language Design and Implementation"
+             #:location "Programming Language Design and Implementation" 
              #:date "1993")
 
   (bib-entry #:key "SRFI-42"
