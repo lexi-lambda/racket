@@ -26,22 +26,19 @@
          internal-definition-context-binding-identifiers
          internal-definition-context-introduce
          internal-definition-context-seal
-         internal-definition-context-sealed?
          identifier-remove-from-definition-context
          
          make-local-expand-context
          flip-introduction-scopes
          flip-introduction-and-use-scopes
 
-         check-intdef
          check+normalize-intdefs)
 
 (struct internal-definition-context (frame-id      ; identifies the frame for use-site scopes
                                      scope         ; scope that represents the context
                                      add-scope?    ; whether the scope is auto-added for expansion
                                      env-mixins    ; bindings for this context: box of list of mix-binding
-                                     parent-ctx    ; parent definition context or #f
-                                     [sealed? #:mutable])) ; whether the context has been used with `local-expand-expression`
+                                     parent-ctx))  ; parent definition context or #f
 
 (struct env-mixin (id
                    sym
@@ -50,7 +47,7 @@
 
 ;; syntax-local-make-definition-context
 (define/who (syntax-local-make-definition-context [parent-ctx #f] [add-scope? #t])
-  (check-intdef who parent-ctx #:allow-false? #t)
+  (check who internal-definition-context? #:or-false parent-ctx)
   (define ctx (get-current-expand-context 'syntax-local-make-definition-context))
   (define frame-id (or (root-expand-context-frame-id ctx)
                        (and parent-ctx (internal-definition-context-frame-id parent-ctx))
@@ -59,14 +56,14 @@
   (define def-ctx-scopes (expand-context-def-ctx-scopes ctx))
   (when def-ctx-scopes
     (set-box! def-ctx-scopes (cons sc (unbox def-ctx-scopes))))
-  (internal-definition-context frame-id sc add-scope? (box null) parent-ctx #f))
+  (internal-definition-context frame-id sc add-scope? (box null) parent-ctx))
 
 ;; syntax-local-bind-syntaxes
 (define/who (syntax-local-bind-syntaxes ids s intdef [extra-intdefs '()])
   (check who #:test (and (list? ids) (andmap identifier? ids)) #:contract "(listof identifier?)" ids)
   (check who syntax? #:or-false s)
-  (check-intdef who intdef #:allow-sealed? #f)
-  (define extra-intdefs-lst (check+normalize-intdefs who extra-intdefs #:allow-sealed? #f #:allow-single? #t))
+  (check who internal-definition-context? intdef)
+  (define extra-intdefs-lst (check+normalize-intdefs who extra-intdefs #:allow-single? #t))
   (define ctx (get-current-expand-context 'local-expand))
   (intdef-bind-syntaxes ctx ids s intdef extra-intdefs-lst)
   (void))
@@ -120,13 +117,13 @@
 
 ;; internal-definition-context-binding-identifiers
 (define/who (internal-definition-context-binding-identifiers intdef)
-  (check-intdef who intdef)
+  (check who internal-definition-context? intdef)
   (for/list ([env-mixin (in-list (unbox (internal-definition-context-env-mixins intdef)))])
     (env-mixin-id env-mixin)))
 
 ;; internal-definition-context-introduce
 (define/who (internal-definition-context-introduce intdef s [mode 'flip])
-  (check-intdef who intdef)
+  (check who internal-definition-context? intdef)
   (check who syntax? s)
   (add-intdef-scopes s (list intdef)
                      #:always? #t
@@ -141,13 +138,8 @@
 
 ;; internal-definition-context-seal
 (define/who (internal-definition-context-seal intdef)
-  (check-intdef who intdef)
-  (void)
-  #;(unless (internal-definition-context-sealed? intdef)
-      (set-internal-definition-context-sealed?! intdef #t)
-      (cond
-        [(internal-definition-context-parent-ctx intdef)
-         => internal-definition-context-seal])))
+  (check who internal-definition-context? intdef)
+  (void))
 
 ;; identifier-remove-from-definition-context
 (define/who (identifier-remove-from-definition-context id intdefs)
@@ -158,31 +150,19 @@
 
 ;; For contract errors:
 (define intdef?-str "internal-definition-context?")
-(define intdef-not-sealed?-str "(and/c internal-definition-context? (not/c internal-definition-context-sealed?))")
-
-(define (check-intdef who intdef
-                      #:allow-sealed? [allow-sealed? #t]
-                      #:allow-false? [allow-false? #f])
-  (unless (or (and (internal-definition-context? intdef)
-                   (or allow-sealed? (not (internal-definition-context-sealed? intdef))))
-              (and allow-false? (not intdef)))
-    (define base-intdef?-str (if allow-sealed? intdef?-str intdef-not-sealed?-str))
-    (raise-argument-error who (string-append "(or/c " base-intdef?-str " #f)") intdef)))
 
 ;; Normalizes an intdefs argument that could be false or a single intdef to a list.
 (define (check+normalize-intdefs who intdefs
-                                 #:allow-sealed? [allow-sealed? #t]
                                  #:allow-false? [allow-false? #f]
                                  #:allow-single? [allow-single? #f])
   (define (fail)
-    (define base-intdef?-str (if allow-sealed? intdef?-str intdef-not-sealed?-str))
-    (define intdefs?-str (string-append "(listof " base-intdef?-str ")"))
+    (define intdefs?-str (string-append "(listof " intdef?-str ")"))
     (define contract-str
       (cond
         [(and (not allow-false?) (not allow-single?))
          intdefs?-str]
         [allow-single?
-         (string-append "(or/c " base-intdef?-str "\n"
+         (string-append "(or/c " intdef?-str "\n"
                         "      " intdefs?-str
                         (if allow-false? "\n      #f)" ")"))]
         [allow-false?
@@ -193,15 +173,10 @@
   (cond
     [(not intdefs)
      (if allow-false? '() (fail))]
+    [(list? intdefs)
+     (if (andmap internal-definition-context? intdefs) intdefs (fail))]
     [else
-     (define (base-intdef? v)
-       (and (internal-definition-context? v)
-            (or allow-sealed? (not (internal-definition-context-sealed? v)))))
-     (cond
-       [(list? intdefs)
-        (if (andmap base-intdef? intdefs) intdefs (fail))]
-       [else
-        (if (and allow-single? (base-intdef? intdefs)) (list intdefs) (fail))])]))
+     (if (and allow-single? (internal-definition-context? intdefs)) (list intdefs) (fail))]))
 
 (define (add-intdef-bindings env intdefs #:only-stxs? [only-stxs? #f])
   (for/fold ([env env]) ([intdef (in-list intdefs)])

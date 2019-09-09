@@ -159,7 +159,6 @@
                       internal-definition-context-binding-identifiers
                       internal-definition-context-introduce
                       internal-definition-context-seal
-                      internal-definition-context-sealed?
                       identifier-remove-from-definition-context
                       
                       make-set!-transformer

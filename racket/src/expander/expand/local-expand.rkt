@@ -122,30 +122,29 @@
    (log-expand local-ctx 'local-pre input-s)
    (when stop-ids (log-expand local-ctx 'start))
 
-   (define output-s
-     (cond
-       [(and as-transformer? capture-lifts?)
-        (expand-transformer input-s local-ctx
-                            #:context context
-                            #:expand-lifts? #f
-                            #:begin-form? #t
-                            #:lift-key lift-key
-                            #:always-wrap? #t
-                            #:keep-stops? #t)]
-       [as-transformer?
-        (expand-transformer input-s local-ctx
-                            #:context context
-                            #:expand-lifts? #f
-                            #:begin-form? (eq? 'top-level context)
-                            #:lift-key lift-key
-                            #:keep-stops? #t)]
-       [capture-lifts?
-        (expand/capture-lifts input-s local-ctx
-                              #:begin-form? #t
-                              #:lift-key lift-key
-                              #:always-wrap? #t)]
-       [else
-        (expand input-s local-ctx)]))
+   (define output-s (cond
+                      [(and as-transformer? capture-lifts?)
+                       (expand-transformer input-s local-ctx
+                                           #:context context
+                                           #:expand-lifts? #f
+                                           #:begin-form? #t
+                                           #:lift-key lift-key
+                                           #:always-wrap? #t
+                                           #:keep-stops? #t)]
+                      [as-transformer?
+                       (expand-transformer input-s local-ctx
+                                           #:context context
+                                           #:expand-lifts? #f
+                                           #:begin-form? (eq? 'top-level context)
+                                           #:lift-key lift-key
+                                           #:keep-stops? #t)]
+                      [capture-lifts?
+                       (expand/capture-lifts input-s local-ctx
+                                             #:begin-form? #t
+                                             #:lift-key lift-key
+                                             #:always-wrap? #t)]
+                      [else
+                       (expand input-s local-ctx)]))
 
    (log-expand local-ctx 'local-post output-s)
    (define result-s (if (parsed? output-s)
