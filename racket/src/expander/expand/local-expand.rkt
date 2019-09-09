@@ -42,13 +42,13 @@
                    #:capture-lifts? #t
                    #:lift-key lift-key))
 
-(define (syntax-local-expand-expression s [opaque-only? #f] [intdefs '()] [value-bindings #f])
+(define (syntax-local-expand-expression s [opaque-only? #f] [intdefs '()])
   (define exp-s (do-local-expand 'syntax-local-expand-expression s 'expression null intdefs
                                  #:to-parsed-ok? opaque-only?
                                  #:skip-log-exit? #t
                                  #:track-to-be-defined? #t
                                  #:keep-#%expression? #f
-                                 #:value-bindings value-bindings))
+                                 #:only-stx-intdefs? #t))
   (define ctx (get-current-expand-context))
   ;; Move introduction scope from the already-expanded syntax object to
   ;; its wrapper. The expander will later check that the wrapper ends up
@@ -72,12 +72,12 @@
                          #:as-transformer? [as-transformer? #f]
                          #:to-parsed-ok? [to-parsed-ok? #f]
                          #:keep-#%expression? [keep-#%expression? #t]
+                         #:only-stx-intdefs? [only-stx-intdefs? #f]
                          #:lift-key [lift-key (and (or capture-lifts?
                                                        as-transformer?)
                                                    (generate-lift-key))]
                          #:track-to-be-defined? [track-to-be-defined? #f]
-                         #:skip-log-exit? [skip-log-exit? #f]
-                         #:value-bindings [value-bindings #f])
+                         #:skip-log-exit? [skip-log-exit? #f])
   (performance-region
    ['expand 'local-expand]
 
@@ -96,85 +96,61 @@
                     (andmap identifier? stop-ids)))
      (raise-argument-error who "(or/c (listof identifier?) #f)" stop-ids))
    (define intdefs-lst (check+normalize-intdefs who intdefs #:allow-single? #t #:allow-false? #t))
-   (unless (or (not value-bindings)
-               (and (list? value-bindings)
-                    (andmap (lambda (binding)
-                              (and (pair? binding)
-                                   (list? (car binding))
-                                   (andmap identifier? (car binding))
-                                   (syntax? (cdr binding))))
-                            value-bindings)))
-     (raise-argument-error who "(or/c (listof (cons/c (listof identifier?) syntax?)) #f)" value-bindings))
-   (unless (or (not value-bindings) (not (null? intdefs-lst)))
-     (raise-arguments-error who "cannot bind values without definition context"
-                            "value bindings" value-bindings))
 
    (define ctx (get-current-expand-context who))
    (define phase (if as-transformer?
                      (add1 (expand-context-phase ctx))
                      (expand-context-phase ctx)))
-
    (namespace-visit-available-modules! (expand-context-namespace ctx) phase)
 
-   (define (do-expand local-ctx)
-     (log-expand local-ctx 'enter-local s)
-     (define input-s (add-intdef-scopes (flip-introduction-scopes s ctx) intdefs-lst))
+   (define local-ctx (make-local-expand-context ctx
+                                                #:context context
+                                                #:phase phase
+                                                #:intdefs intdefs-lst
+                                                #:only-stx-intdefs? only-stx-intdefs?
+                                                #:stop-ids stop-ids
+                                                #:to-parsed-ok? to-parsed-ok?
+                                                #:keep-#%expression? (or keep-#%expression?
+                                                                         (and (expand-context-in-local-expand? ctx)
+                                                                              (expand-context-keep-#%expression? ctx)))
+                                                #:track-to-be-defined? track-to-be-defined?))
 
-     (when as-transformer? (log-expand local-ctx 'phase-up))
-     (log-expand local-ctx 'local-pre input-s)
-     (when stop-ids (log-expand local-ctx 'start))
-   
-     (begin0
-       (cond
-         [(and as-transformer? capture-lifts?)
-          (expand-transformer input-s local-ctx
-                              #:context context
-                              #:expand-lifts? #f
-                              #:begin-form? #t
-                              #:lift-key lift-key
-                              #:always-wrap? #t
-                              #:keep-stops? #t)]
-         [as-transformer?
-          (expand-transformer input-s local-ctx
-                              #:context context
-                              #:expand-lifts? #f
-                              #:begin-form? (eq? 'top-level context)
-                              #:lift-key lift-key
-                              #:keep-stops? #t)]
-         [capture-lifts?
-          (expand/capture-lifts input-s local-ctx
-                                #:begin-form? #t
-                                #:lift-key lift-key
-                                #:always-wrap? #t)]
-         [else
-          (expand input-s local-ctx)])
-       (log-expand local-ctx 'local-post output-s)))
+   (log-expand local-ctx 'enter-local s)
+   (define input-s (add-intdef-scopes (flip-introduction-scopes s ctx) intdefs-lst))
+
+   (when as-transformer? (log-expand local-ctx 'phase-up))
+   (log-expand local-ctx 'local-pre input-s)
+   (when stop-ids (log-expand local-ctx 'start))
 
    (define output-s
      (cond
-       [value-bindings
-        (expand-and-split-intdefs ctx
-                                  #:intdefs intdefs
-                                  #:value-bindings value-bindings
-                                  #:get-body do-expand)]
+       [(and as-transformer? capture-lifts?)
+        (expand-transformer input-s local-ctx
+                            #:context context
+                            #:expand-lifts? #f
+                            #:begin-form? #t
+                            #:lift-key lift-key
+                            #:always-wrap? #t
+                            #:keep-stops? #t)]
+       [as-transformer?
+        (expand-transformer input-s local-ctx
+                            #:context context
+                            #:expand-lifts? #f
+                            #:begin-form? (eq? 'top-level context)
+                            #:lift-key lift-key
+                            #:keep-stops? #t)]
+       [capture-lifts?
+        (expand/capture-lifts input-s local-ctx
+                              #:begin-form? #t
+                              #:lift-key lift-key
+                              #:always-wrap? #t)]
        [else
-        (define local-ctx (make-local-expand-context ctx
-                                                     #:context context
-                                                     #:phase phase
-                                                     #:intdefs intdefs-lst
-                                                     #:stop-ids stop-ids
-                                                     #:to-parsed-ok? to-parsed-ok?
-                                                     #:keep-#%expression? (or keep-#%expression?
-                                                                              (and (expand-context-in-local-expand? ctx)
-                                                                                   (expand-context-keep-#%expression? ctx)))
-                                                     #:track-to-be-defined? track-to-be-defined?))
-        (begin0
-          (do-expand local-ctx)
-          (unless skip-log-exit?
-            (log-expand local-ctx 'exit-local result-s)))]))
-   
+        (expand input-s local-ctx)]))
+
+   (log-expand local-ctx 'local-post output-s)
    (define result-s (if (parsed? output-s)
                         output-s
                         (flip-introduction-scopes output-s ctx)))
-
+   (unless skip-log-exit?
+     (log-expand local-ctx 'exit-local result-s))
    result-s))

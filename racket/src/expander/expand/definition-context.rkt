@@ -30,7 +30,6 @@
          identifier-remove-from-definition-context
          
          make-local-expand-context
-         expand-and-split-intdefs
          flip-introduction-scopes
          flip-introduction-and-use-scopes
 
@@ -143,7 +142,12 @@
 ;; internal-definition-context-seal
 (define/who (internal-definition-context-seal intdef)
   (check-intdef who intdef)
-  (void))
+  (void)
+  #;(unless (internal-definition-context-sealed? intdef)
+      (set-internal-definition-context-sealed?! intdef #t)
+      (cond
+        [(internal-definition-context-parent-ctx intdef)
+         => internal-definition-context-seal])))
 
 ;; identifier-remove-from-definition-context
 (define/who (identifier-remove-from-definition-context id intdefs)
@@ -199,22 +203,26 @@
        [else
         (if (and allow-single? (base-intdef? intdefs)) (list intdefs) (fail))])]))
 
-(define (add-intdef-bindings env intdefs)
+(define (add-intdef-bindings env intdefs #:only-stxs? [only-stxs? #f])
   (for/fold ([env env]) ([intdef (in-list intdefs)])
     (define parent-ctx (internal-definition-context-parent-ctx intdef))
-    (define parent-env (if parent-ctx (add-intdef-bindings env (list parent-ctx)) env))
+    (define parent-env (if parent-ctx
+                           (add-intdef-bindings env (list parent-ctx) #:only-stxs? only-stxs?)
+                           env))
     (define env-mixins (unbox (internal-definition-context-env-mixins intdef)))
     (let loop ([env parent-env] [env-mixins env-mixins])
       (cond
        [(null? env-mixins) env]
        [else
         (define env-mixin (car env-mixins))
-        (or (hash-ref (env-mixin-cache env-mixin) env #f)
-            (let ([new-env (env-extend (loop env (cdr env-mixins))
-                                       (env-mixin-sym env-mixin)
-                                       (env-mixin-value env-mixin))])
-              (hash-set! (env-mixin-cache env-mixin) env new-env)
-              new-env))]))))
+        (if (and only-stxs? (variable? (env-mixin-value env-mixin)))
+            (loop env (cdr env-mixins))
+            (or (hash-ref (env-mixin-cache env-mixin) env #f)
+                (let ([new-env (env-extend (loop env (cdr env-mixins))
+                                           (env-mixin-sym env-mixin)
+                                           (env-mixin-value env-mixin))])
+                  (hash-set! (env-mixin-cache env-mixin) env new-env)
+                  new-env)))]))))
 
 (define (add-intdef-scopes s intdefs
                            #:always? [always? #f]
@@ -230,6 +238,7 @@
                                    #:context context
                                    #:phase [phase (expand-context-phase ctx)]
                                    #:intdefs intdefs
+                                   #:only-stx-intdefs? [only-stx-intdefs? #f]
                                    #:stop-ids [stop-ids #f]
                                    #:to-parsed-ok? [to-parsed-ok? #f]
                                    #:track-to-be-defined? [track-to-be-defined? #f]
@@ -245,7 +254,8 @@
   (struct*-copy expand-context ctx
                 [context context]
                 [env (add-intdef-bindings (expand-context-env ctx)
-                                          intdefs)]
+                                          intdefs
+                                          #:only-stxs? only-stx-intdefs?)]
                 [use-site-scopes
                  #:parent root-expand-context
                  (and (or (eq? context 'module)
@@ -323,37 +333,6 @@
                 [keep-#%expression? #f]
                 [stops empty-free-id-set]
                 [current-introduction-scopes '()]))
-
-(define (expand-and-split-intdefs ctx
-                                  #:intdefs intdefs
-                                  #:value-bindings value-bindings
-                                  #:get-body get-body-in-ctx)
-  (define first-intdef (car intdefs))
-  (define-values (idss keyss rhss track-stxs)
-    (for/lists (idss keyss rhss track-stxs)
-               ([binding (in-list value-bindings)])
-      (define ids (for/list ([id (in-list (car binding))])
-                    (add-intdef-scopes id intdefs #:always? #t)))
-      (define-values (intdef-ids keys) (intdef-bind-syntaxes ctx ids #f first-intdef))
-      (values intdef-ids
-              keys
-              (flip-introduction-scopes (add-intdef-scopes (cdr binding) intdefs) ctx)
-              #f)))
-  (for ([intdef (in-list intdefs)])
-    (set-internal-definition-context-sealed?! intdef #t))
-
-  (define frame-id (make-reference-record))
-  (define rhs-ctx (make-rhs-expand-context ctx #:intdefs intdefs #:frame-id frame-id))
-
-  (define (get-body)
-    (list (get-body-in-ctx (struct*-copy expand-context (as-tail-context rhs-ctx #:wrt ctx)
-                                         [reference-records (expand-context-reference-records ctx)]))))
-  (expand-and-split-bindings-by-reference
-   idss keyss rhss track-stxs
-   #:split? #t
-   #:frame-id frame-id #:ctx rhs-ctx
-   #:source empty-syntax #:had-stxes? #t
-   #:get-body get-body #:track? #f))
 
 ;; ----------------------------------------
 
